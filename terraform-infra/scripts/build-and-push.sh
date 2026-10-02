@@ -66,7 +66,7 @@ elif [ $# -eq 1 ]; then
 else
     # Try to get from Terraform outputs first
     print_status "Trying to get image names from Terraform outputs..."
-    TERRAFORM_DIR="$PROJECT_ROOT/terraform-infra/environments/dev"
+    TERRAFORM_DIR="$PROJECT_ROOT/terraform-infra"
     
     if [ -d "$TERRAFORM_DIR" ]; then
         cd "$TERRAFORM_DIR"
@@ -79,8 +79,8 @@ else
         print_warning "Terraform outputs not available, reading from terraform.tfvars..."
         
         if [ -f "$TERRAFORM_DIR/terraform.tfvars" ]; then
-            FRONTEND_IMAGE=$(grep '^frontend_docker_image' "$TERRAFORM_DIR/terraform.tfvars" | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d ' ')
-            BACKEND_IMAGE=$(grep '^backend_docker_image' "$TERRAFORM_DIR/terraform.tfvars" | sed 's/.*=\s*"\(.*\)".*/\1/' | tr -d ' ')
+            FRONTEND_IMAGE=$(grep '^frontend_docker_image' "$TERRAFORM_DIR/terraform.tfvars" | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' | tr -d ' ')
+            BACKEND_IMAGE=$(grep '^backend_docker_image' "$TERRAFORM_DIR/terraform.tfvars" | sed -E 's/.*=[[:space:]]*"([^"]*)".*/\1/' | tr -d ' ')
         fi
     fi
     
@@ -108,8 +108,8 @@ print_success "Backend image: $BACKEND_IMAGE"
 
 # Get AWS region (optional, for ASG refresh)
 REGION="us-east-1"
-if [ -d "$PROJECT_ROOT/terraform-infra/environments/dev" ]; then
-    cd "$PROJECT_ROOT/terraform-infra/environments/dev"
+if [ -d "$PROJECT_ROOT/terraform-infra" ]; then
+    cd "$PROJECT_ROOT/terraform-infra"
     REGION=$(terraform output -raw region 2>/dev/null || echo "us-east-1")
 fi
 
@@ -133,79 +133,84 @@ else
     print_success "Successfully logged into Docker Hub"
 fi
 
-echo ""
-print_status "========================================"
-print_status "Building and Pushing FRONTEND Image"
-print_status "========================================"
-
-# Build frontend
-print_status "Building frontend image..."
-cd "$PROJECT_ROOT/frontend"
-
-if ! docker build -t goal-tracker-frontend:latest .; then
-    print_error "Failed to build frontend image"
-    exit 1
-fi
-print_success "Frontend image built successfully"
-
-# Tag frontend with multiple tags
-print_status "Tagging frontend image for Docker Hub..."
+# Target platform(s) - EC2 instances are x86_64 (t3.*), so amd64 is required.
+# Override for multi-arch, e.g.: PLATFORMS=linux/amd64,linux/arm64 ./build-and-push.sh
+PLATFORMS="${PLATFORMS:-linux/amd64}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-docker tag goal-tracker-frontend:latest $FRONTEND_IMAGE
-docker tag goal-tracker-frontend:latest ${FRONTEND_IMAGE%:*}:$TIMESTAMP
 
-print_success "Tagged as: $FRONTEND_IMAGE"
-print_success "Tagged as: ${FRONTEND_IMAGE%:*}:$TIMESTAMP"
-
-# Push frontend to Docker Hub
-print_status "Pushing frontend images to Docker Hub..."
-if ! docker push $FRONTEND_IMAGE; then
-    print_error "Failed to push frontend image to Docker Hub"
+# Ensure a buildx builder is available
+if ! docker buildx version &>/dev/null; then
+    print_error "docker buildx is required (Docker Desktop includes it)"
     exit 1
 fi
 
-if ! docker push ${FRONTEND_IMAGE%:*}:$TIMESTAMP; then
-    print_warning "Failed to push timestamped frontend image (non-critical)"
-fi
+# Remove old local images for a repository (all tags + local build tag)
+remove_old_images() {
+    local repo="$1"
+    local local_name="$2"
 
-print_success "Frontend image pushed to Docker Hub successfully"
+    print_status "Removing old local images for $repo..."
+    local old_images
+    old_images=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -E "^($repo|$local_name):" || true)
+    if [ -n "$old_images" ]; then
+        echo "$old_images" | xargs docker rmi -f >/dev/null 2>&1 || true
+        echo "$old_images" | sed 's/^/    removed: /'
+    else
+        echo "    no old images found"
+    fi
+}
 
-echo ""
-print_status "========================================"
-print_status "Building and Pushing BACKEND Image"
-print_status "========================================"
+# Build for target platform(s), push, and verify the pushed manifest
+build_and_push() {
+    local name="$1"     # frontend | backend
+    local context="$2"  # build context directory
+    local image="$3"    # full image name with tag
+    local repo="${image%:*}"
 
-# Build backend
-print_status "Building backend image..."
-cd "$PROJECT_ROOT/backend"
+    echo ""
+    print_status "========================================"
+    print_status "Building and Pushing $(echo "$name" | tr a-z A-Z) Image ($PLATFORMS)"
+    print_status "========================================"
 
-if ! docker build -t goal-tracker-backend:latest .; then
-    print_error "Failed to build backend image"
-    exit 1
-fi
-print_success "Backend image built successfully"
+    remove_old_images "$repo" "goal-tracker-$name"
 
-# Tag backend with multiple tags
-print_status "Tagging backend image for Docker Hub..."
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-docker tag goal-tracker-backend:latest $BACKEND_IMAGE
-docker tag goal-tracker-backend:latest ${BACKEND_IMAGE%:*}:$TIMESTAMP
+    print_status "Building and pushing $name image..."
+    if ! docker buildx build \
+        --platform "$PLATFORMS" \
+        --provenance=false \
+        --pull \
+        -t "$image" \
+        -t "$repo:$TIMESTAMP" \
+        --push \
+        "$context"; then
+        print_error "Failed to build/push $name image"
+        exit 1
+    fi
+    print_success "Pushed: $image"
+    print_success "Pushed: $repo:$TIMESTAMP"
 
-print_success "Tagged as: $BACKEND_IMAGE"
-print_success "Tagged as: ${BACKEND_IMAGE%:*}:$TIMESTAMP"
+    print_status "Verifying pushed image platforms..."
+    # .Image is a single config (one platform) or a platform->config map (multi-arch)
+    # Retry: registry may briefly lag right after a push
+    local image_json=""
+    for attempt in 1 2 3 4 5; do
+        image_json=$(docker buildx imagetools inspect "$image" --format '{{json .Image}}' 2>&1) && break
+        print_warning "Inspect attempt $attempt failed, retrying in 5s..."
+        sleep 5
+    done
+    echo "$image_json" | grep -oE '"architecture": *"[^"]+"' | sort -u | sed 's/^/    /'
+    if ! echo "$image_json" | grep -qE '"architecture": *"amd64"'; then
+        print_error "$image does not contain linux/amd64 - EC2 instances will fail to pull it"
+        exit 1
+    fi
+    print_success "$name image verified for linux/amd64"
+}
 
-# Push backend to Docker Hub
-print_status "Pushing backend images to Docker Hub..."
-if ! docker push $BACKEND_IMAGE; then
-    print_error "Failed to push backend image to Docker Hub"
-    exit 1
-fi
+build_and_push frontend "$PROJECT_ROOT/frontend" "$FRONTEND_IMAGE"
+build_and_push backend "$PROJECT_ROOT/backend" "$BACKEND_IMAGE"
 
-if ! docker push ${BACKEND_IMAGE%:*}:$TIMESTAMP; then
-    print_warning "Failed to push timestamped backend image (non-critical)"
-fi
-
-print_success "Backend image pushed to Docker Hub successfully"
+# Clean up dangling layers left from previous builds
+docker image prune -f >/dev/null 2>&1 || true
 
 # Return to original directory
 cd "$PROJECT_ROOT"
@@ -222,7 +227,7 @@ print_success "Images are now available on Docker Hub!"
 DOCKER_USERNAME=$(echo "$FRONTEND_IMAGE" | cut -d'/' -f1)
 
 # Ask if user wants to trigger instance refresh (only if Terraform is deployed)
-TERRAFORM_DIR="$PROJECT_ROOT/terraform-infra/environments/dev"
+TERRAFORM_DIR="$PROJECT_ROOT/terraform-infra"
 if [ -d "$TERRAFORM_DIR" ]; then
     cd "$TERRAFORM_DIR"
     
@@ -287,7 +292,7 @@ if [ -d "$TERRAFORM_DIR" ] && terraform state list &>/dev/null 2>&1; then
     echo "  3. Check frontend logs: aws logs tail /aws/ec2/\$(cd $TERRAFORM_DIR && terraform output -raw environment 2>/dev/null)-\$(cd $TERRAFORM_DIR && terraform output -raw project 2>/dev/null)/frontend --follow --region $REGION"
     echo "  4. Check backend logs: aws logs tail /aws/ec2/\$(cd $TERRAFORM_DIR && terraform output -raw environment 2>/dev/null)-\$(cd $TERRAFORM_DIR && terraform output -raw project 2>/dev/null)/backend --follow --region $REGION"
 else
-    echo "  2. Deploy infrastructure: cd $PROJECT_ROOT/terraform-infra/environments/dev && terraform apply"
+    echo "  2. Deploy infrastructure: cd $PROJECT_ROOT/terraform-infra && terraform apply"
     echo "  3. Or test locally: cd $PROJECT_ROOT/docker-local-deployment && docker-compose up"
 fi
 echo ""
