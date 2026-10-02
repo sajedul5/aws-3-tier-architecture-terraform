@@ -13,12 +13,12 @@ resource "aws_db_subnet_group" "main" {
 
 # DB Parameter Group
 resource "aws_db_parameter_group" "main" {
-  name   = "${var.environment}-${var.project}-pg15"
-  family = "postgres15"
+  name   = "${var.environment}-${var.project}-pg18"
+  family = "postgres18"
 
   parameter {
     name  = "log_connections"
-    value = "1"
+    value = "all"
   }
 
   parameter {
@@ -34,7 +34,7 @@ resource "aws_db_parameter_group" "main" {
   tags = merge(
     var.tags,
     {
-      Name = "${var.environment}-${var.project}-pg15"
+      Name = "${var.environment}-${var.project}-pg18"
     }
   )
 }
@@ -71,8 +71,9 @@ resource "aws_db_instance" "main" {
   final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.environment}-${var.project}-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
 
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
-  monitoring_interval             = var.monitoring_interval
-  monitoring_role_arn             = var.monitoring_interval > 0 ? aws_iam_role.rds_monitoring[0].arn : null
+
+  monitoring_interval = var.monitoring_interval
+  monitoring_role_arn = var.monitoring_interval > 0 ? aws_iam_role.rds_monitoring[0].arn : null
 
   auto_minor_version_upgrade = true
   deletion_protection        = var.deletion_protection
@@ -92,10 +93,12 @@ resource "aws_iam_role" "rds_monitoring" {
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
+
     Statement = [
       {
         Action = "sts:AssumeRole"
         Effect = "Allow"
+
         Principal = {
           Service = "monitoring.rds.amazonaws.com"
         }
@@ -106,6 +109,7 @@ resource "aws_iam_role" "rds_monitoring" {
   tags = var.tags
 }
 
+# IAM Policy Attachment for Enhanced Monitoring
 resource "aws_iam_role_policy_attachment" "rds_monitoring" {
   count      = var.monitoring_interval > 0 ? 1 : 0
   role       = aws_iam_role.rds_monitoring[0].name
