@@ -12,7 +12,7 @@ resource "random_password" "db_password" {
 
 # VPC Module
 module "vpc" {
-  source = "../../modules/vpc"
+  source = "./modules/vpc"
 
   environment           = var.environment
   project               = var.project
@@ -30,7 +30,7 @@ module "vpc" {
 
 # Security Groups Module
 module "security_groups" {
-  source = "../../modules/security-groups"
+  source = "./modules/security-groups"
 
   environment       = var.environment
   project           = var.project
@@ -42,7 +42,7 @@ module "security_groups" {
 
 # IAM Module
 module "iam" {
-  source = "../../modules/iam"
+  source = "./modules/iam"
 
   environment  = var.environment
   project      = var.project
@@ -53,7 +53,7 @@ module "iam" {
 
 # RDS Module
 module "rds" {
-  source = "../../modules/rds"
+  source = "./modules/rds"
 
   environment             = var.environment
   project                 = var.project
@@ -74,7 +74,7 @@ module "rds" {
 
 # Secrets Manager Module
 module "secrets" {
-  source = "../../modules/secrets"
+  source = "./modules/secrets"
 
   environment = var.environment
   project     = var.project
@@ -89,7 +89,7 @@ module "secrets" {
 
 # Bastion Module
 module "bastion" {
-  source = "../../modules/bastion"
+  source = "./modules/bastion"
 
   environment          = var.environment
   project              = var.project
@@ -104,7 +104,7 @@ module "bastion" {
 
 # Public Application Load Balancer Module (Frontend)
 module "alb" {
-  source = "../../modules/alb"
+  source = "./modules/alb"
 
   environment       = var.environment
   project           = var.project
@@ -120,7 +120,7 @@ module "alb" {
 
 # Internal Application Load Balancer Module (Backend)
 module "internal_alb" {
-  source = "../../modules/alb"
+  source = "./modules/alb"
 
   environment       = var.environment
   project           = var.project
@@ -136,7 +136,7 @@ module "internal_alb" {
 
 # Frontend ASG Module
 module "frontend_asg" {
-  source = "../../modules/frontend-asg"
+  source = "./modules/frontend-asg"
 
   environment          = var.environment
   project              = var.project
@@ -163,7 +163,7 @@ module "frontend_asg" {
 
 # Backend ASG Module
 module "backend_asg" {
-  source = "../../modules/backend-asg"
+  source = "./modules/backend-asg"
 
   environment          = var.environment
   project              = var.project
