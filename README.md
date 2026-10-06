@@ -99,3 +99,7 @@ terraform destroy
 ---
 
 **Author:** Md Sajedul Islam, DevOps Engineer · **Stack:** Terraform | AWS | Docker | Node.js | Go | PostgreSQL
+
+## License
+
+MIT. See [LICENSE](LICENSE).
